@@ -1,3 +1,4 @@
+use std::iter::Map;
 use crate::opsgenie::error::{
     MissingAuthorizationHeaderSnafu, NoOnCallPersonSnafu, NoPhoneNumberSnafu,
     RequestOnCallPersonSnafu, RequestPhoneNumberForPersonSnafu,
@@ -6,12 +7,12 @@ use crate::opsgenie::Error::{
     NoOnCallPerson, NoPhoneNumber, RequestOnCallPerson, RequestPhoneNumberForPerson,
 };
 use crate::util::send_json_request;
-use crate::{get_person_on_call, http_error, PersonInfo, Schedule};
+use crate::{get_person_on_call, http_error, AlertInfo, Schedule};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use futures::future::join_all;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HOST};
 use reqwest::{Client, Response, Url};
-use serde::Deserialize;
+use serde::{Serialize, Deserialize};
 use snafu::{OptionExt, ResultExt, Snafu};
 
 static OPSGENIE_BASEURL: &str = "https://api.opsgenie.com/v2/";
@@ -45,9 +46,9 @@ impl http_error::Error for Error {
     }
 }
 
-#[derive(Clone, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
-struct UserPhoneNumber {
+pub struct UserPhoneNumber {
     name: String,
     phone: Vec<String>,
 }
@@ -73,7 +74,7 @@ pub(crate) async fn get_oncall_number(
     headers: HeaderMap,
     http: Client,
     base_url: Url,
-) -> Result<PersonInfo, Error> {
+) -> Result<AlertInfo, Error> {
     let authorization_header = headers
         .get(AUTHORIZATION)
         .context(MissingAuthorizationHeaderSnafu)?;
@@ -131,9 +132,11 @@ pub(crate) async fn get_oncall_number(
     let user = result_list.get(0).context(NoOnCallPersonSnafu)?;
     let username = &user.name;
     let phone_number = user.phone.get(0).context(NoPhoneNumberSnafu{ username: username})?;
-    Ok(PersonInfo {
+
+    Ok(AlertInfo {
         username: username.clone(),
         phone_number: phone_number.clone(),
+        full: result_list
     })
 }
 
@@ -175,13 +178,17 @@ async fn get_phone_number(
             .query(&[("expand", "contact")]),
     )
     .await?;
-    let numbers = contact_information
+    let mut numbers = contact_information
         .data
         .userContacts
         .iter()
-        .filter(|user_contact| user_contact.contactMethod.eq("voice"))
+        .filter(|user_contact| user_contact.contactMethod.eq("voice") || user_contact.contactMethod.eq("sms"))
         .map(|user_contact| format_phone_number(user_contact.to.clone()))
         .collect::<Vec<String>>();
+
+    // Sort to enable easier deduplication and remove duplicate numbers
+    numbers.sort();
+    numbers.dedup();
 
     Ok(numbers)
 }

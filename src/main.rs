@@ -2,7 +2,7 @@ mod http_error;
 mod opsgenie;
 mod util;
 
-use crate::opsgenie::get_oncall_number;
+use crate::opsgenie::{get_oncall_number, UserPhoneNumber};
 use crate::StartupError::{ConstructBaseUrl, ConvertOsString};
 use axum::extract::Query;
 use axum::http::HeaderMap;
@@ -16,12 +16,16 @@ use std::convert::Into;
 use std::env;
 use std::ffi::OsString;
 use std::sync::Arc;
+use stackable_operator::logging::TracingTarget;
 use tokio::net::TcpListener;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 static BIND_ADDRESS_ENVNAME: &str = "WYGC_BIND_ADDRESS";
 static DEFAULT_BIND_ADDRESS: &str = "127.0.0.1";
 static BIND_PORT_ENVNAME: &str = "WYGC_BIND_PORT";
 static DEFAULT_BIND_PORT: &str = "2368";
+
+pub const APP_NAME: &str = "who-you-gonna-call";
 
 #[derive(Debug, Clone)]
 struct AppState {
@@ -85,6 +89,13 @@ impl http_error::Error for GetUserInfoError {
 
 #[tokio::main]
 async fn main() -> Result<(), StartupError> {
+    stackable_operator::logging::initialize_logging(
+        "WHOYOUGONNACALL_LOG",
+        APP_NAME,
+        // TODO: Make this configurable
+        TracingTarget::None,
+    );
+
     let shutdown_requested = tokio::signal::ctrl_c().map(|_| ());
     #[cfg(unix)]
     let shutdown_requested = {
@@ -107,6 +118,7 @@ async fn main() -> Result<(), StartupError> {
             envname: DEFAULT_BIND_ADDRESS,
         })?
         .to_string();
+
 
     let bind_port = env::var_os(BIND_PORT_ENVNAME)
         .unwrap_or(OsString::from(DEFAULT_BIND_PORT))
@@ -159,16 +171,17 @@ struct ScheduleRequestById {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Hash, Clone)]
 #[serde(rename_all = "camelCase")]
-struct PersonInfo {
+struct AlertInfo {
     username: String,
     phone_number: String,
+    full: Vec<UserPhoneNumber>
 }
 
 async fn get_person_on_call(
     State(state): State<AppState>,
     Query(requested_schedule): Query<Schedule>,
     headers: HeaderMap,
-) -> Result<Json<PersonInfo>, http_error::JsonResponse<GetUserInfoError>> {
+) -> Result<Json<AlertInfo>, http_error::JsonResponse<GetUserInfoError>> {
     let AppState {
         http,
         opsgenie_baseurl,
