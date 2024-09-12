@@ -1,0 +1,37 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whoyougonnacall-deployment
+  labels:
+    app: whoyougonnacall
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: whoyougonnacall
+  template:
+    metadata:
+      labels:
+        app: whoyougonnacall
+    spec:
+      containers:
+        - name: whoyougonnacall
+          imagePullPolicy: Always
+          env:
+            - name: WYGC_BIND_ADDRESS
+              value: 0.0.0.0
+          image: docker.stackable.tech/stackable-experimental/wygc:0.0.0-dev
+          ports:
+             - name: http
+               containerPort: 2368
+          livenessProbe:
+            tcpSocket:
+              port: 2368
+            initialDelaySeconds: 15
+            periodSeconds: 10
+#            httpGet:
+#              path: /status
+#              port: 2368
+#            initialDelaySeconds: 7
+#            periodSeconds: 10

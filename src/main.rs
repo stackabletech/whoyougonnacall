@@ -120,6 +120,7 @@ async fn main() -> Result<(), StartupError> {
 
     let app = Router::new()
         .route("/oncallnumber", get(get_person_on_call))
+        .route("/status", get(health))
         .with_state(AppState {
             http,
             opsgenie_baseurl,
@@ -159,6 +160,22 @@ struct AlertInfo {
     username: String,
     phone_number: String,
     full_information: Vec<UserPhoneNumber>
+}
+
+async fn health()-> Result<Json<Status>, http_error::JsonResponse<GetUserInfoError>> {
+    Ok(Json(Status { health: Health::Healthy }))
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Hash, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    health: Health
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Hash, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum Health {
+    Healthy, Sick
 }
 
 async fn get_person_on_call(

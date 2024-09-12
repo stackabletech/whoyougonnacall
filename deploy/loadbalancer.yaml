@@ -1,0 +1,15 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whoyougonnacall-service
+  labels:
+    app: whoyougonnacall
+spec:
+  selector:
+    app: whoyougonnacall
+  ports:
+    - name: http
+      port: 2368
+      targetPort: 2368
+  type: LoadBalancer
