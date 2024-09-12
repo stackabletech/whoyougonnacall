@@ -3,7 +3,6 @@ mod opsgenie;
 mod util;
 
 use crate::opsgenie::{get_oncall_number, UserPhoneNumber};
-use crate::StartupError::{ConstructBaseUrl, ConvertOsString};
 use axum::extract::Query;
 use axum::http::HeaderMap;
 use axum::routing::get;
@@ -12,13 +11,10 @@ use futures::{future, pin_mut, FutureExt};
 use reqwest::{ClientBuilder, Url};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, Snafu};
-use std::convert::Into;
 use std::env;
 use std::ffi::OsString;
-use std::sync::Arc;
 use stackable_operator::logging::TracingTarget;
 use tokio::net::TcpListener;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 static BIND_ADDRESS_ENVNAME: &str = "WYGC_BIND_ADDRESS";
 static DEFAULT_BIND_ADDRESS: &str = "127.0.0.1";
@@ -35,9 +31,6 @@ struct AppState {
 
 #[derive(Snafu, Debug)]
 enum StartupError {
-    #[snafu(display("failed to parse config file"))]
-    ParseConfig { source: serde_json::Error },
-
     #[snafu(display("failed to register SIGTERM handler"))]
     RegisterSigterm { source: std::io::Error },
 
@@ -49,15 +42,6 @@ enum StartupError {
 
     #[snafu(display("failed to construct http client"))]
     ConstructHttpClient { source: reqwest::Error },
-
-    #[snafu(display("failed to open ca certificate"))]
-    OpenCaCert { source: std::io::Error },
-
-    #[snafu(display("failed to read ca certificate"))]
-    ReadCaCert { source: std::io::Error },
-
-    #[snafu(display("failed to parse ca certificate"))]
-    ParseCaCert { source: reqwest::Error },
 
     #[snafu(display("failed to read value of [{envname}] env var as string"))]
     ConvertOsString { envname: String },
@@ -174,7 +158,7 @@ struct ScheduleRequestById {
 struct AlertInfo {
     username: String,
     phone_number: String,
-    full: Vec<UserPhoneNumber>
+    full_information: Vec<UserPhoneNumber>
 }
 
 async fn get_person_on_call(

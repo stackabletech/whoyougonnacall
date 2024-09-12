@@ -1,17 +1,12 @@
-use std::iter::Map;
 use crate::opsgenie::error::{
-    MissingAuthorizationHeaderSnafu, NoOnCallPersonSnafu, NoPhoneNumberSnafu,
+    NoOnCallPersonSnafu, NoPhoneNumberSnafu,
     RequestOnCallPersonSnafu, RequestPhoneNumberForPersonSnafu,
 };
-use crate::opsgenie::Error::{
-    NoOnCallPerson, NoPhoneNumber, RequestOnCallPerson, RequestPhoneNumberForPerson,
-};
 use crate::util::send_json_request;
-use crate::{get_person_on_call, http_error, AlertInfo, Schedule};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use futures::future::join_all;
-use reqwest::header::{ACCEPT, AUTHORIZATION, HOST};
-use reqwest::{Client, Response, Url};
+use crate::{http_error, AlertInfo, Schedule};
+use axum::http::{HeaderMap, StatusCode};
+use reqwest::header::HOST;
+use reqwest::{Client, Url};
 use serde::{Serialize, Deserialize};
 use snafu::{OptionExt, ResultExt, Snafu};
 
@@ -19,8 +14,6 @@ static OPSGENIE_BASEURL: &str = "https://api.opsgenie.com/v2/";
 #[derive(Snafu, Debug)]
 #[snafu(module)]
 pub(crate) enum Error {
-    #[snafu(display("request is missing AUTHORIZATION header"))]
-    MissingAuthorizationHeader {},
     #[snafu(display("requesting on call person failed"))]
     RequestOnCallPerson { source: crate::util::Error },
     #[snafu(display("requesting phone number failed for [{username}]"))]
@@ -37,7 +30,6 @@ pub(crate) enum Error {
 impl http_error::Error for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::MissingAuthorizationHeader { .. } => StatusCode::UNAUTHORIZED,
             Error::RequestOnCallPerson { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Error::NoOnCallPerson { .. } => StatusCode::IM_A_TEAPOT,
             Error::NoPhoneNumber { .. } => StatusCode::IM_A_TEAPOT,
@@ -75,10 +67,6 @@ pub(crate) async fn get_oncall_number(
     http: Client,
     base_url: Url,
 ) -> Result<AlertInfo, Error> {
-    let authorization_header = headers
-        .get(AUTHORIZATION)
-        .context(MissingAuthorizationHeaderSnafu)?;
-
     let mut url_builder = base_url.clone();
 
     let (schedule_identifier, schedule_identifier_type) = match schedule {
@@ -136,7 +124,7 @@ pub(crate) async fn get_oncall_number(
     Ok(AlertInfo {
         username: username.clone(),
         phone_number: phone_number.clone(),
-        full: result_list
+        full_information: result_list
     })
 }
 
@@ -171,7 +159,7 @@ async fn get_phone_number(
     username: &str,
 ) -> Result<Vec<String>, crate::util::Error> {
     let url_builder = base_url.clone();
-    let mut url_builder = url_builder.join(&format!("users/{username}")).unwrap();
+    let url_builder = url_builder.join(&format!("users/{username}")).unwrap();
     let contact_information = send_json_request::<ContactInformationResult>(
         http.get(url_builder.clone())
             .headers(headers.clone())
