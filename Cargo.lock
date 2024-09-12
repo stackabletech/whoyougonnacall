@@ -2967,6 +2967,7 @@ dependencies = [
  "serde_json",
  "snafu 0.8.4",
  "stackable-operator",
+ "strum_macros",
  "tokio",
  "tracing",
  "tracing-subscriber",

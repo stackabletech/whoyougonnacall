@@ -13,8 +13,11 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::env;
 use std::ffi::OsString;
+use std::fmt::{Display, Formatter};
 use stackable_operator::logging::TracingTarget;
 use tokio::net::TcpListener;
+use tracing::{instrument, Value};
+use tracing::field::{Field, Visit};
 
 static BIND_ADDRESS_ENVNAME: &str = "WYGC_BIND_ADDRESS";
 static DEFAULT_BIND_ADDRESS: &str = "127.0.0.1";
@@ -80,6 +83,7 @@ async fn main() -> Result<(), StartupError> {
         TracingTarget::None,
     );
 
+    tracing::debug!("Registering shutdown hook..");
     let shutdown_requested = tokio::signal::ctrl_c().map(|_| ());
     #[cfg(unix)]
     let shutdown_requested = {
@@ -102,6 +106,7 @@ async fn main() -> Result<(), StartupError> {
             envname: DEFAULT_BIND_ADDRESS,
         })?
         .to_string();
+    tracing::debug!("Bind address set to: [{}]", bind_address);
 
 
     let bind_port = env::var_os(BIND_PORT_ENVNAME)
@@ -111,12 +116,15 @@ async fn main() -> Result<(), StartupError> {
             envname: DEFAULT_BIND_PORT,
         })?
         .to_string();
+    tracing::debug!("Bind port set to: [{}]", bind_address);
 
     let opsgenie_baseurl = opsgenie::get_base_url().context(ConstructBaseUrlSnafu)?;
+    tracing::debug!("OpsGenie base url correctly parsed as : [{}]", opsgenie_baseurl.to_string());
 
     let http = ClientBuilder::new()
         .build()
         .context(ConstructHttpClientSnafu)?;
+    tracing::debug!("Reqwest client initialized ..");
 
     let app = Router::new()
         .route("/oncallnumber", get(get_person_on_call))
@@ -128,7 +136,9 @@ async fn main() -> Result<(), StartupError> {
     let listener = TcpListener::bind(format!("{bind_address}:{bind_port}"))
         .await
         .context(BindListenerSnafu)?;
+    tracing::info!("Bound to [{}]", format!("{bind_address}:{bind_port}"));
 
+    tracing::info!("Starting server ..");
     axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(shutdown_requested)
         .await
@@ -187,10 +197,11 @@ async fn get_person_on_call(
         http,
         opsgenie_baseurl,
     } = state;
-
+    tracing::info!("Got request for schedule [{:?}]", requested_schedule);
     Ok(Json(
         get_oncall_number(requested_schedule, headers, http, opsgenie_baseurl)
             .await
             .context(get_user_info_error::OpsGenieSnafu)?,
     ))
 }
+

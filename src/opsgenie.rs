@@ -5,6 +5,7 @@ use crate::opsgenie::error::{
 use crate::util::send_json_request;
 use crate::{http_error, AlertInfo, Schedule};
 use axum::http::{HeaderMap, StatusCode};
+use hyper::header::AUTHORIZATION;
 use reqwest::header::HOST;
 use reqwest::{Client, Url};
 use serde::{Serialize, Deserialize};
@@ -80,8 +81,12 @@ pub(crate) async fn get_oncall_number(
 
     // TODO: Double check if this is even necessary or if reqwest maybe
     //  rewrites the host header anyway
-    let mut outgoing_headers = headers.clone();
-    outgoing_headers.remove(HOST);
+    let mut outgoing_headers = HeaderMap::new();
+    //outgoing_headers.remove(HOST);
+    outgoing_headers.insert(AUTHORIZATION, headers.get(AUTHORIZATION).unwrap().clone());
+
+    tracing::debug!("Retrieving on call person from [{}]", url_builder.to_string());
+    tracing::debug!("Using headers: [{:?}]", outgoing_headers);
 
     let persons_on_call = send_json_request::<OnCallResult>(
         http.get(url_builder.clone())
@@ -160,12 +165,16 @@ async fn get_phone_number(
 ) -> Result<Vec<String>, crate::util::Error> {
     let url_builder = base_url.clone();
     let url_builder = url_builder.join(&format!("users/{username}")).unwrap();
+    tracing::debug!("Retrieving contact information for [{}] information from [{}]", username, url_builder.to_string());
+    tracing::debug!("Using headers: [{:?}]", headers);
     let contact_information = send_json_request::<ContactInformationResult>(
         http.get(url_builder.clone())
             .headers(headers.clone())
             .query(&[("expand", "contact")]),
     )
     .await?;
+    tracing::trace!("Got data from opsgenie: [{:?}]", contact_information);
+
     let mut numbers = contact_information
         .data
         .userContacts
@@ -180,7 +189,6 @@ async fn get_phone_number(
 
     Ok(numbers)
 }
-// https://api.opsgenie.com/v2/users/soenke.liebau@stackable.tech?expand=contact
 
 fn format_phone_number(number: String) -> String {
     let number = number.replace("-", "");
