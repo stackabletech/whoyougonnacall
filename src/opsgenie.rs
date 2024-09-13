@@ -42,8 +42,8 @@ impl http_error::Error for Error {
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct UserPhoneNumber {
-    name: String,
-    phone: Vec<String>,
+    pub name: String,
+    pub phone: Vec<String>,
 }
 
 #[derive(Clone, Deserialize, Debug)]
@@ -63,27 +63,26 @@ pub fn get_base_url() -> Result<Url, url::ParseError> {
 }
 
 pub(crate) async fn get_oncall_number(
-    schedule: Schedule,
-    headers: HeaderMap,
-    http: Client,
-    base_url: Url,
+    schedule: &Schedule,
+    headers: &HeaderMap,
+    http: &Client,
+    base_url: &Url,
 ) -> Result<AlertInfo, Error> {
     let mut url_builder = base_url.clone();
 
     let (schedule_identifier, schedule_identifier_type) = match schedule {
-        Schedule::ScheduleById(id) => (id.id, "id"),
-        Schedule::ScheduleByName(name) => (name.name, "name"),
+        Schedule::ScheduleById(id) => (&id.id, "id"),
+        Schedule::ScheduleByName(name) => (&name.name, "name"),
     };
 
     url_builder = url_builder
         .join(&format!("schedules/{schedule_identifier}/on-calls"))
         .unwrap();
 
-    // TODO: Double check if this is even necessary or if reqwest maybe
-    //  rewrites the host header anyway
     let mut outgoing_headers = HeaderMap::new();
-    //outgoing_headers.remove(HOST);
-    outgoing_headers.insert(AUTHORIZATION, headers.get(AUTHORIZATION).unwrap().clone());
+    if let Some(geniekey) = headers.get("opsgenie_credentials") {
+        outgoing_headers.insert(AUTHORIZATION, geniekey.clone());
+    }
 
     tracing::debug!("Retrieving on call person from [{}]", url_builder.to_string());
     tracing::debug!("Using headers: [{:?}]", outgoing_headers);
