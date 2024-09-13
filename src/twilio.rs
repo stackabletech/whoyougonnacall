@@ -70,7 +70,7 @@ pub async fn alert(
     // Create the Hashmap once here, we'll overwrite the "To" field for every iteration....
     // .. no we won't, we are parallelizing here, so we clone
     let mut params = HashMap::new();
-    params.insert("From", "+41039263102".to_string());
+    params.insert("From", "+4941039263102".to_string());
 
     let requests = numbers
         .iter()
@@ -78,38 +78,49 @@ pub async fn alert(
             let mut my_params = params.clone();
             my_params.insert("To", number.clone());
 
-            (number.clone(), send_json_request::<TwilioResponse>(
-                http.post(url_builder.clone())
-                    .headers(outgoing_headers.clone())
-                    .form(&my_params),
-            ).await)
+            (
+                number.clone(),
+                send_json_request::<TwilioResponse>(
+                    http.post(url_builder.clone())
+                        .headers(outgoing_headers.clone())
+                        .form(&my_params),
+                )
+                .await,
+            )
         })
         .collect::<Vec<_>>();
 
-    let (succeeded, failed)= join_all(requests).await.iter().partition(|result| result.1.is_ok());
-    tracing::debug!("{:?}", succeeded);
+    let results = join_all(requests).await;
+
     /*
-    for number in numbers {
-        let mut params = HashMap::new();
-        params.insert("To", number.clone());
-        params.insert("From", "+4941039263102".to_string());
+  // Check if there were any failures
+  let failures = results
+      .iter()
+      .map(|result| result.1)
+      .filter(Result::Err)
+      .collect();
 
-        tracing::info!("Ringing [{}]", number);
-        tracing::debug!("Calling url: [{}] with form encoded params [{:?}]", url_builder.to_string(), params);
-        let twilio_response: TwilioResponse = send_json_request(
-            http.post(url_builder.clone())
-                .headers(outgoing_headers.clone())
-                .form(&params)
-        )
-        .await.context(RunWorkflowSnafu)?;
+  for number in numbers {
+      let mut params = HashMap::new();
+      params.insert("To", number.clone());
+      params.insert("From", "+4941039263102".to_string());
+
+      tracing::info!("Ringing [{}]", number);
+      tracing::debug!("Calling url: [{}] with form encoded params [{:?}]", url_builder.to_string(), params);
+      let twilio_response: TwilioResponse = send_json_request(
+          http.post(url_builder.clone())
+              .headers(outgoing_headers.clone())
+              .form(&params)
+      )
+      .await.context(RunWorkflowSnafu)?;
 
 
-        if twilio_response.status.eq("active") {
-            tracing::info!("Twilio reported success!");
-        }
-    }
+      if twilio_response.status.eq("active") {
+          tracing::info!("Twilio reported success!");
+      }
+  }
 
-     */
+   */
 
     Ok(AlertInfo {
         username: "".to_string(),
