@@ -2,6 +2,7 @@ mod http_error;
 mod opsgenie;
 mod twilio;
 mod util;
+mod config;
 
 use crate::opsgenie::{get_oncall_number, UserPhoneNumber};
 use crate::twilio::alert;
@@ -105,41 +106,7 @@ async fn main() -> Result<(), StartupError> {
         }
     };
 
-    // Determine address and port to listen on from env vars, use default values if not set
-    // TODO: Pretty sure this is a garbage way of doing this, need to look at it some more
-    //  `into_string()` probably is the way to go here ..
-    let bind_address = env::var_os(BIND_ADDRESS_ENVNAME)
-        .unwrap_or(OsString::from(DEFAULT_BIND_ADDRESS))
-        .to_str()
-        .context(ConvertOsStringSnafu {
-            envname: DEFAULT_BIND_ADDRESS,
-        })?
-        .to_string();
-    tracing::debug!("Bind address set to: [{}]", bind_address);
 
-    let bind_port = env::var_os(BIND_PORT_ENVNAME)
-        .unwrap_or(OsString::from(DEFAULT_BIND_PORT))
-        .to_str()
-        .context(ConvertOsStringSnafu {
-            envname: DEFAULT_BIND_PORT,
-        })?
-        .to_string();
-    tracing::debug!("Bind port set to: [{}]", bind_address);
-
-    let opsgenie_baseurl = opsgenie::get_base_url().context(ConstructBaseUrlSnafu {
-        service: "opsgenie",
-    })?;
-    tracing::debug!(
-        "OpsGenie base url parsed as : [{}]",
-        opsgenie_baseurl.to_string()
-    );
-
-    let twilio_baseurl =
-        twilio::get_base_url().context(ConstructBaseUrlSnafu { service: "twilio" })?;
-    tracing::debug!(
-        "Twilio base url parsed as : [{}]",
-        twilio_baseurl.to_string()
-    );
 
     let http = ClientBuilder::new()
         .build()
