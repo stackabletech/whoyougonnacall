@@ -2969,6 +2969,7 @@ dependencies = [
  "hyper",
  "pin-project",
  "reqwest",
+ "secrecy",
  "serde",
  "serde_json",
  "snafu 0.8.4",

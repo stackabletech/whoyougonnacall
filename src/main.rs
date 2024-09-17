@@ -21,6 +21,7 @@ use std::fmt::{Display, Formatter};
 use tokio::net::TcpListener;
 use tracing::field::{Field, Visit};
 use tracing::{instrument, Value};
+use crate::config::Config;
 
 static BIND_ADDRESS_ENVNAME: &str = "WYGC_BIND_ADDRESS";
 static DEFAULT_BIND_ADDRESS: &str = "127.0.0.1";
@@ -32,6 +33,7 @@ pub const APP_NAME: &str = "who-you-gonna-call";
 #[derive(Debug, Clone)]
 struct AppState {
     http: reqwest::Client,
+    config: Config,
     opsgenie_baseurl: Url,
     twilio_baseurl: Url,
 }
@@ -92,6 +94,8 @@ async fn main() -> Result<(), StartupError> {
         // TODO: Make this configurable
         TracingTarget::None,
     );
+
+
 
     tracing::debug!("Registering shutdown hook..");
     let shutdown_requested = tokio::signal::ctrl_c().map(|_| ());
