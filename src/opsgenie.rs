@@ -4,12 +4,14 @@ use crate::opsgenie::error::{
 };
 use crate::util::send_json_request;
 use crate::{http_error, AlertInfo, Schedule};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use hyper::header::AUTHORIZATION;
 use reqwest::header::HOST;
 use reqwest::{Client, Url};
+use secrecy::ExposeSecret;
 use serde::{Serialize, Deserialize};
 use snafu::{OptionExt, ResultExt, Snafu};
+use crate::config::Config;
 
 static OPSGENIE_BASEURL: &str = "https://api.opsgenie.com/v2/";
 #[derive(Snafu, Debug)]
@@ -64,11 +66,11 @@ pub fn get_base_url() -> Result<Url, url::ParseError> {
 
 pub(crate) async fn get_oncall_number(
     schedule: &Schedule,
-    headers: &HeaderMap,
     http: &Client,
-    base_url: &Url,
+    config: &Config,
 ) -> Result<AlertInfo, Error> {
-    let mut url_builder = base_url.clone();
+    let Config { opsgenie_config, slack_config, .. } = config;
+    let mut url_builder = opsgenie_config.base_url.clone();
 
     let (schedule_identifier, schedule_identifier_type) = match schedule {
         Schedule::ScheduleById(id) => (&id.id, "id"),
@@ -80,9 +82,7 @@ pub(crate) async fn get_oncall_number(
         .unwrap();
 
     let mut outgoing_headers = HeaderMap::new();
-    if let Some(geniekey) = headers.get("opsgenie_credentials") {
-        outgoing_headers.insert(AUTHORIZATION, geniekey.clone());
-    }
+    outgoing_headers.insert(AUTHORIZATION, opsgenie_config.credentials.expose_secret().clone().0);
 
     tracing::debug!("Retrieving on call person from [{}]", url_builder.to_string());
     tracing::debug!("Using headers: [{:?}]", outgoing_headers);
@@ -111,7 +111,7 @@ pub(crate) async fn get_oncall_number(
     for user in persons_on_call.data.on_call_recipients {
         println!("Looking up phone number for user [{}]", user);
         let phone_number =
-            get_phone_number(http.clone(), base_url.clone(), &outgoing_headers, &user)
+            get_phone_number(http.clone(), opsgenie_config.base_url.clone(), &outgoing_headers, &user)
                 .await
                 .context(RequestPhoneNumberForPersonSnafu { username: &user })?;
         result_list.push(UserPhoneNumber {

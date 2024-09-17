@@ -1,9 +1,13 @@
-use crate::config::ConfigError::{ConstructBaseUrl, MissingOptionalValue, MissingRequiredValue};
+use crate::config::ConfigError::{
+    ConstructAuthHeader, ConstructBaseUrl, MissingOptionalValue, MissingRequiredValue,
+};
 use crate::{opsgenie, twilio};
-use secrecy::SecretString;
+use hyper::header::{HeaderValue, InvalidHeaderValue};
+use secrecy::{CloneableSecret, DebugSecret, ExposeSecret, Secret, SecretString, Zeroize};
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::env;
 use std::ffi::OsString;
+use std::fmt::{Debug, Formatter};
 use tracing::instrument;
 use url::Url;
 
@@ -16,12 +20,36 @@ static DEFAULT_BIND_PORT: &str = "2368";
 static TWILIO_TOKEN_ENVNAME: &str = "WYGC_TWILIO_TOKEN";
 static TWILIO_BASEURL_ENVNAME: &str = "WYGC_TWILIO_BASEURL";
 static TWILIO_WORKFLOW_ENVNAME: &str = "WYGC_TWILIO_WORKFLOW";
+static TWILIO_OUTGOING_NUMBER_ENVNAME: &str = "WYGC_TWILIO_OUTNUMBER";
 
 static OPSGENIE_TOKEN_ENVNAME: &str = "WYGC_OPSGENIE_TOKEN";
 static OPSGENIE_BASEURL_ENVNAME: &str = "WYGC_OPSGENIE_BASEURL";
 
 static SLACK_TOKEN_ENVNAME: &str = "WYGC_SLACK_TOKEN";
 static SLACK_BASEURL_ENVNAME: &str = "WYGC_SLACK_BASEURL";
+
+// Create our own secrecy wrapper around HeaderValue in order to avoid logging any
+// confidential values in tracing spans
+// The Benefit of doing it here instead of storing as a string here and parsing later is that we
+// can fail early on startup if illegal values are configured instead of starting up and having
+// to log an error for every request.
+#[derive(Clone)]
+pub struct AuthHeader(pub HeaderValue);
+
+impl Zeroize for AuthHeader {
+    fn zeroize(&mut self) {
+        // TODO: not sure how to handle this, currently we don't securely overwrite in memory
+        //  but the trait needs to be implemented to be able to implement CloneableSecret
+    }
+}
+
+impl CloneableSecret for AuthHeader {}
+
+/// Provides a `Debug` impl (by default `[[REDACTED]]`)
+impl DebugSecret for AuthHeader {}
+
+/// Use this alias when storing secret values
+pub type SecretAuthHeader = Secret<AuthHeader>;
 
 #[derive(Snafu, Debug)]
 pub enum ConfigError {
@@ -31,7 +59,10 @@ pub enum ConfigError {
     #[snafu(display("missing mandatory configuration [{envname}]"))]
     MissingRequiredValue { envname: String },
 
-    #[snafu(display("optional config value not found: [{envname}], the following functionality will be disabled: [{functionality}]"))]
+    #[snafu(
+        display("optional config value not found: [{envname}], the following functionality will be disabled: [{functionality}]"
+        )
+    )]
     MissingOptionalValue {
         envname: String,
         functionality: String,
@@ -41,6 +72,11 @@ pub enum ConfigError {
     ConstructBaseUrl {
         source: url::ParseError,
         service: String,
+    },
+    #[snafu(display("unable to parse authz header value from [{envname}]"))]
+    ConstructAuthHeader {
+        source: InvalidHeaderValue,
+        envname: String,
     },
 }
 
@@ -58,20 +94,21 @@ pub struct Config {
 #[derive(Debug, Clone)]
 pub struct SlackConfig {
     pub url: Url,
-    pub token: SecretString,
+    pub token: SecretAuthHeader,
 }
 
 #[derive(Debug, Clone)]
 pub struct OpsgenieConfig {
     pub base_url: Url,
-    pub credentials: SecretString,
+    pub credentials: SecretAuthHeader,
 }
 
 #[derive(Debug, Clone)]
 pub struct TwilioConfig {
     pub base_url: Url,
-    pub credentials: SecretString,
+    pub credentials: SecretAuthHeader,
     pub workflow_id: String,
+    pub outgoing_number: String,
 }
 
 impl Config {
@@ -125,17 +162,7 @@ impl OpsgenieConfig {
         })?;
         tracing::debug!("OpsGenie base url parsed as : [{}]", base_url.to_string());
 
-        let credentials = SecretString::new(
-            env::var_os(OPSGENIE_TOKEN_ENVNAME)
-                .context(MissingRequiredValueSnafu {
-                    envname: OPSGENIE_TOKEN_ENVNAME,
-                })?
-                .to_str()
-                .context(ConvertOsStringSnafu {
-                    envname: OPSGENIE_TOKEN_ENVNAME,
-                })?
-                .to_string(),
-        );
+        let credentials = get_secret_header_from_env(OPSGENIE_TOKEN_ENVNAME)?;
 
         Ok(OpsgenieConfig {
             base_url,
@@ -152,17 +179,7 @@ impl TwilioConfig {
             twilio::get_base_url().context(ConstructBaseUrlSnafu { service: "twilio" })?;
         tracing::debug!("Twilio base url parsed as : [{}]", base_url.to_string());
 
-        let credentials = SecretString::new(
-            env::var_os(TWILIO_TOKEN_ENVNAME)
-                .context(MissingRequiredValueSnafu {
-                    envname: TWILIO_TOKEN_ENVNAME,
-                })?
-                .to_str()
-                .context(ConvertOsStringSnafu {
-                    envname: TWILIO_TOKEN_ENVNAME,
-                })?
-                .to_string(),
-        );
+        let credentials = get_secret_header_from_env(TWILIO_TOKEN_ENVNAME)?;
 
         let workflow_id = env::var_os(TWILIO_WORKFLOW_ENVNAME)
             .context(MissingRequiredValueSnafu {
@@ -174,10 +191,21 @@ impl TwilioConfig {
             })?
             .to_string();
 
+        let outgoing_number = env::var_os(TWILIO_OUTGOING_NUMBER_ENVNAME)
+            .context(MissingRequiredValueSnafu {
+                envname: TWILIO_OUTGOING_NUMBER_ENVNAME,
+            })?
+            .to_str()
+            .context(ConvertOsStringSnafu {
+                envname: TWILIO_OUTGOING_NUMBER_ENVNAME,
+            })?
+            .to_string();
+
         Ok(TwilioConfig {
             base_url,
             credentials,
             workflow_id,
+            outgoing_number,
         })
     }
 }
@@ -190,27 +218,12 @@ impl SlackConfig {
         // with a "missing mandatory value" error, as we cannot call the webhook without a token
 
         if let Some(var_value) = env::var_os(SLACK_BASEURL_ENVNAME) {
-            let url = Url::parse(
-                var_value
-                    .to_str()
-                    .context(ConvertOsStringSnafu {
-                        envname: SLACK_BASEURL_ENVNAME,
-                    })?
-                    ,
-            )
+            let url = Url::parse(var_value.to_str().context(ConvertOsStringSnafu {
+                envname: SLACK_BASEURL_ENVNAME,
+            })?)
             .context(ConstructBaseUrlSnafu { service: "slack" })?;
 
-            let token = SecretString::new(
-                env::var_os(SLACK_TOKEN_ENVNAME)
-                    .context(MissingRequiredValueSnafu {
-                        envname: SLACK_TOKEN_ENVNAME,
-                    })?
-                    .to_str()
-                    .context(ConvertOsStringSnafu {
-                        envname: SLACK_TOKEN_ENVNAME,
-                    })?
-                    .to_string(),
-            );
+            let token = get_secret_header_from_env(SLACK_TOKEN_ENVNAME)?;
 
             Ok(Some(SlackConfig { url, token }))
         } else {
@@ -221,4 +234,16 @@ impl SlackConfig {
             Ok(None)
         }
     }
+}
+
+fn get_secret_header_from_env(envname: &str) -> Result<SecretAuthHeader, ConfigError> {
+    Ok(SecretAuthHeader::new(AuthHeader(
+        HeaderValue::from_str(
+            env::var_os(envname)
+                .context(MissingRequiredValueSnafu { envname })?
+                .to_str()
+                .context(ConvertOsStringSnafu { envname })?,
+        )
+        .context(ConstructAuthHeaderSnafu { envname })?,
+    )))
 }

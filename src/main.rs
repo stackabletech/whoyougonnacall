@@ -198,18 +198,12 @@ async fn get_person_on_call(
     headers: HeaderMap,
 ) -> Result<Json<AlertInfo>, http_error::JsonResponse<RequestError>> {
     let AppState { http, config } = state;
-    let Config {
-        opsgenie_config,
-        slack_config,
-        ..
-    } = config;
     tracing::info!("Got request for schedule [{:?}]", requested_schedule);
     Ok(Json(
         get_oncall_number(
             &requested_schedule,
-            &headers,
             &http,
-            &opsgenie_config.base_url,
+            &config,
         )
         .await
         .context(request_error::OpsGenieSnafu)?,
@@ -223,12 +217,6 @@ async fn alert_on_call(
     headers: HeaderMap,
 ) -> Result<Json<AlertInfo>, http_error::JsonResponse<RequestError>> {
     let AppState { http, config } = state;
-    let Config {
-        opsgenie_config,
-        twilio_config,
-        slack_config,
-        ..
-    } = config;
     tracing::info!("Got alert request [{:?}]", requested_alert);
 
     let schedule = Schedule::ScheduleByName(ScheduleRequestByName {
@@ -236,7 +224,7 @@ async fn alert_on_call(
     });
     let twilio_workflow = requested_alert.twilio_workflow;
     tracing::trace!("twilio workflow: [{}]", twilio_workflow);
-    let people_to_alert = get_oncall_number(&schedule, &headers, &http, &opsgenie_config.base_url)
+    let people_to_alert = get_oncall_number(&schedule, &http, &config)
         .await
         .context(request_error::OpsGenieSnafu)?;
 
@@ -251,7 +239,7 @@ async fn alert_on_call(
     tracing::info!("Will call these phones: [{:?}]", numbers);
 
     Ok(Json(
-        alert(&numbers, &twilio_config.workflow_id, &headers, &http, &twilio_config.base_url)
+        alert(&numbers, &http, &config)
             .await
             .context(request_error::TwilioSnafu)?,
     ))
