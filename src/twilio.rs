@@ -11,6 +11,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use std::collections::HashMap;
+use tracing::instrument;
 use url::{ParseError, Url};
 use urlencoding::encode;
 
@@ -39,6 +40,7 @@ impl http_error::Error for crate::twilio::Error {
     }
 }
 
+#[instrument(name = "parse_config")]
 pub async fn alert(
     numbers: &Vec<String>,
     twilio_workflow: &str,

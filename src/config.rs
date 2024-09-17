@@ -1,9 +1,10 @@
-use crate::config::ConfigError::{MissingOptionalValue, MissingRequiredValue};
+use crate::config::ConfigError::{ConstructBaseUrl, MissingOptionalValue, MissingRequiredValue};
 use crate::{opsgenie, twilio};
 use secrecy::SecretString;
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::env;
 use std::ffi::OsString;
+use tracing::instrument;
 use url::Url;
 
 static BIND_ADDRESS_ENVNAME: &str = "WYGC_BIND_ADDRESS";
@@ -23,7 +24,7 @@ static SLACK_TOKEN_ENVNAME: &str = "WYGC_SLACK_TOKEN";
 static SLACK_BASEURL_ENVNAME: &str = "WYGC_SLACK_BASEURL";
 
 #[derive(Snafu, Debug)]
-enum ConfigError {
+pub enum ConfigError {
     #[snafu(display("failed to read value of [{envname}] env var as string"))]
     ConvertOsString { envname: String },
 
@@ -36,7 +37,7 @@ enum ConfigError {
         functionality: String,
     },
 
-    #[snafu(display("baseurl parse error for service [{service}] - THIS IS NOT ON YOU! It is an error in the code!"))]
+    #[snafu(display("baseurl parse error for service [{service}]"))]
     ConstructBaseUrl {
         source: url::ParseError,
         service: String,
@@ -45,35 +46,36 @@ enum ConfigError {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    bind_address: String,
-    bind_port: String,
+    pub bind_address: String,
+    pub bind_port: String,
 
-    opsgenie_config: OpsgenieConfig,
-    twilio_config: TwilioConfig,
+    pub opsgenie_config: OpsgenieConfig,
+    pub twilio_config: TwilioConfig,
 
-    slack_config: Option<SlackConfig>,
+    pub slack_config: Option<SlackConfig>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SlackConfig {
-    url: Url,
-    token: SecretString,
+    pub url: Url,
+    pub token: SecretString,
 }
 
 #[derive(Debug, Clone)]
 pub struct OpsgenieConfig {
-    base_url: Url,
-    credentials: SecretString,
+    pub base_url: Url,
+    pub credentials: SecretString,
 }
 
 #[derive(Debug, Clone)]
 pub struct TwilioConfig {
-    base_url: Url,
-    credentials: SecretString,
-    workflow_id: String,
+    pub base_url: Url,
+    pub credentials: SecretString,
+    pub workflow_id: String,
 }
 
 impl Config {
+    #[instrument(name = "parse_config")]
     pub fn new() -> Result<Self, ConfigError> {
         // Determine address and port to listen on from env vars, use default values if not set
         // TODO: Pretty sure this is a garbage way of doing this, need to look at it some more
@@ -101,11 +103,7 @@ impl Config {
 
         // Attempt to parse SlackConfig, if no webhook is configured log a warning and continue,
         // if we encounter an actual error, abort startup
-        let slack_config = match SlackConfig::new() {
-            Ok(slack_config) => {Ok(Some(slack_config))}
-            Err(ref e) if e.kind() == MissingOptionalValue => {Ok(None)}
-            Err(e) => {e?}
-        };
+        let slack_config = SlackConfig::new()?;
 
         // Put it all together into a filled config object
         Ok(Config {
@@ -113,7 +111,7 @@ impl Config {
             bind_port,
             opsgenie_config,
             twilio_config,
-            slack_config: None,
+            slack_config,
         })
     }
 }
@@ -185,35 +183,42 @@ impl TwilioConfig {
 }
 
 impl SlackConfig {
-    pub fn new() -> Result<Self, ConfigError> {
+    pub fn new() -> Result<Option<Self>, ConfigError> {
         // We try to parse the Slack Webhook url first, if that is not present, no harm done - we log
         // that we won't alert on Slack and go on our merry way
         // If the webhook is present but the token is missing that is not good, and we'll error out
         // with a "missing mandatory value" error, as we cannot call the webhook without a token
 
-        let base_url = env::var_os(SLACK_BASEURL_ENVNAME)
-            .context(MissingOptionalValueSnafu {
-                envname: SLACK_BASEURL_ENVNAME,
-                functionality: "slack notifications",
-            })?
-            .to_str()
-            .context(ConvertOsStringSnafu {
-                envname: SLACK_BASEURL_ENVNAME,
-            })?
-            .to_string();
+        if let Some(var_value) = env::var_os(SLACK_BASEURL_ENVNAME) {
+            let url = Url::parse(
+                var_value
+                    .to_str()
+                    .context(ConvertOsStringSnafu {
+                        envname: SLACK_BASEURL_ENVNAME,
+                    })?
+                    ,
+            )
+            .context(ConstructBaseUrlSnafu { service: "slack" })?;
 
-        let token = SecretString::new(
-            env::var_os(SLACK_TOKEN_ENVNAME)
-                .context(MissingRequiredValueSnafu {
-                    envname: SLACK_TOKEN_ENVNAME,
-                })?
-                .to_str()
-                .context(ConvertOsStringSnafu {
-                    envname: SLACK_TOKEN_ENVNAME,
-                })?
-                .to_string(),
-        );
+            let token = SecretString::new(
+                env::var_os(SLACK_TOKEN_ENVNAME)
+                    .context(MissingRequiredValueSnafu {
+                        envname: SLACK_TOKEN_ENVNAME,
+                    })?
+                    .to_str()
+                    .context(ConvertOsStringSnafu {
+                        envname: SLACK_TOKEN_ENVNAME,
+                    })?
+                    .to_string(),
+            );
 
-        Ok(SlackConfig { url, token })
+            Ok(Some(SlackConfig { url, token }))
+        } else {
+            // Variable is not set, we'll continue without Slack notifications
+            tracing::warn!(
+                "[{SLACK_BASEURL_ENVNAME}] not set, Slack notifictions will be disabled!"
+            );
+            Ok(None)
+        }
     }
 }

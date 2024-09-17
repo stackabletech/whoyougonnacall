@@ -1,11 +1,13 @@
+mod config;
 mod http_error;
 mod opsgenie;
 mod twilio;
 mod util;
-mod config;
 
+use crate::config::{Config, ConfigError};
 use crate::opsgenie::{get_oncall_number, UserPhoneNumber};
 use crate::twilio::alert;
+use crate::StartupError::ParseConfig;
 use axum::extract::Query;
 use axum::http::HeaderMap;
 use axum::routing::get;
@@ -14,6 +16,7 @@ use futures::{future, pin_mut, FutureExt};
 use reqwest::{ClientBuilder, Url};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, Snafu};
+use stackable_operator::kube::config::InferConfigError;
 use stackable_operator::logging::TracingTarget;
 use std::env;
 use std::ffi::OsString;
@@ -21,7 +24,6 @@ use std::fmt::{Display, Formatter};
 use tokio::net::TcpListener;
 use tracing::field::{Field, Visit};
 use tracing::{instrument, Value};
-use crate::config::Config;
 
 static BIND_ADDRESS_ENVNAME: &str = "WYGC_BIND_ADDRESS";
 static DEFAULT_BIND_ADDRESS: &str = "127.0.0.1";
@@ -34,14 +36,15 @@ pub const APP_NAME: &str = "who-you-gonna-call";
 struct AppState {
     http: reqwest::Client,
     config: Config,
-    opsgenie_baseurl: Url,
-    twilio_baseurl: Url,
 }
 
 #[derive(Snafu, Debug)]
 enum StartupError {
     #[snafu(display("failed to register SIGTERM handler"))]
     RegisterSigterm { source: std::io::Error },
+
+    #[snafu(display("Failed parsing config"))]
+    ParseConfig { source: ConfigError },
 
     #[snafu(display("failed to bind listener"))]
     BindListener { source: std::io::Error },
@@ -95,7 +98,8 @@ async fn main() -> Result<(), StartupError> {
         TracingTarget::None,
     );
 
-
+    // Create config object and error out if anything goes wrong
+    let config = Config::new().context(ParseConfigSnafu)?;
 
     tracing::debug!("Registering shutdown hook..");
     let shutdown_requested = tokio::signal::ctrl_c().map(|_| ());
@@ -110,8 +114,6 @@ async fn main() -> Result<(), StartupError> {
         }
     };
 
-
-
     let http = ClientBuilder::new()
         .build()
         .context(ConstructHttpClientSnafu)?;
@@ -121,15 +123,13 @@ async fn main() -> Result<(), StartupError> {
         .route("/oncallnumber", get(get_person_on_call))
         .route("/alert", get(alert_on_call))
         .route("/status", get(health))
-        .with_state(AppState {
-            http,
-            opsgenie_baseurl,
-            twilio_baseurl,
-        });
-    let listener = TcpListener::bind(format!("{bind_address}:{bind_port}"))
+        .with_state(AppState { http, config: config.clone() }); // TODO: get rid of the .clone()
+
+    let bind_address = format!("{}:{}", &config.bind_address, &config.bind_port);
+    let listener = TcpListener::bind(&bind_address)
         .await
         .context(BindListenerSnafu)?;
-    tracing::info!("Bound to [{}]", format!("{bind_address}:{bind_port}"));
+    tracing::info!("Bound to [{}]", &bind_address);
 
     tracing::info!("Starting server ..");
     axum::serve(listener, app.into_make_service())
@@ -191,47 +191,54 @@ pub enum Health {
     Sick,
 }
 
+#[instrument(name = "get_person")]
 async fn get_person_on_call(
     State(state): State<AppState>,
     Query(requested_schedule): Query<Schedule>,
     headers: HeaderMap,
 ) -> Result<Json<AlertInfo>, http_error::JsonResponse<RequestError>> {
-    let AppState {
-        http,
-        opsgenie_baseurl,
-        twilio_baseurl,
-    } = state;
+    let AppState { http, config } = state;
+    let Config {
+        opsgenie_config,
+        slack_config,
+        ..
+    } = config;
     tracing::info!("Got request for schedule [{:?}]", requested_schedule);
     Ok(Json(
-        get_oncall_number(&requested_schedule, &headers, &http, &opsgenie_baseurl)
-            .await
-            .context(request_error::OpsGenieSnafu)?,
+        get_oncall_number(
+            &requested_schedule,
+            &headers,
+            &http,
+            &opsgenie_config.base_url,
+        )
+        .await
+        .context(request_error::OpsGenieSnafu)?,
     ))
 }
 
+#[instrument(name = "parse_config")]
 async fn alert_on_call(
     State(state): State<AppState>,
     Query(requested_alert): Query<Alert>,
     headers: HeaderMap,
 ) -> Result<Json<AlertInfo>, http_error::JsonResponse<RequestError>> {
-    let AppState {
-        http,
-        opsgenie_baseurl,
-        twilio_baseurl,
-    } = state;
+    let AppState { http, config } = state;
+    let Config {
+        opsgenie_config,
+        twilio_config,
+        slack_config,
+        ..
+    } = config;
     tracing::info!("Got alert request [{:?}]", requested_alert);
 
-    let schedule = Schedule::ScheduleByName(ScheduleRequestByName {name: requested_alert.schedule });
+    let schedule = Schedule::ScheduleByName(ScheduleRequestByName {
+        name: requested_alert.schedule,
+    });
     let twilio_workflow = requested_alert.twilio_workflow;
     tracing::trace!("twilio workflow: [{}]", twilio_workflow);
-    let people_to_alert = get_oncall_number(
-        &schedule,
-        &headers,
-        &http,
-        &opsgenie_baseurl,
-    )
-    .await
-    .context(request_error::OpsGenieSnafu)?;
+    let people_to_alert = get_oncall_number(&schedule, &headers, &http, &opsgenie_config.base_url)
+        .await
+        .context(request_error::OpsGenieSnafu)?;
 
     // Collect all phone number that we need to ring into one vec
     let numbers: Vec<String> = people_to_alert
@@ -244,7 +251,7 @@ async fn alert_on_call(
     tracing::info!("Will call these phones: [{:?}]", numbers);
 
     Ok(Json(
-        alert(&numbers, &twilio_workflow, &headers, &http, &twilio_baseurl)
+        alert(&numbers, &twilio_config.workflow_id, &headers, &http, &twilio_config.base_url)
             .await
             .context(request_error::TwilioSnafu)?,
     ))
