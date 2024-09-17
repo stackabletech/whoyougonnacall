@@ -19,11 +19,12 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, Snafu};
 use stackable_operator::kube::config::InferConfigError;
 use stackable_operator::logging::TracingTarget;
+use stackable_telemetry::AxumTraceLayer;
 use std::env;
 use std::ffi::OsString;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
+use std::process::{ExitCode, Termination};
 use std::time::Duration;
-use stackable_telemetry::AxumTraceLayer;
 use tokio::net::TcpListener;
 use tracing::field::{Field, Visit};
 use tracing::{instrument, Value};
@@ -43,19 +44,19 @@ struct AppState {
 
 #[derive(Snafu, Debug)]
 enum StartupError {
-    #[snafu(display("failed to register SIGTERM handler"))]
+    #[snafu(display("failed to register SIGTERM handler: \n{source}"))]
     RegisterSigterm { source: std::io::Error },
 
-    #[snafu(display("Failed parsing config"))]
+    #[snafu(display("Failed parsing config: \n{source}"))]
     ParseConfig { source: ConfigError },
 
-    #[snafu(display("failed to bind listener"))]
+    #[snafu(display("failed to bind listener: \n{source}"))]
     BindListener { source: std::io::Error },
 
-    #[snafu(display("failed to run server"))]
+    #[snafu(display("failed to run server: \n{source}"))]
     RunServer { source: stackable_webhook::Error },
 
-    #[snafu(display("failed to construct http client"))]
+    #[snafu(display("failed to construct http client: \n{source}"))]
     ConstructHttpClient { source: reqwest::Error },
 
     #[snafu(display("failed to read value of [{envname}] env var as string"))]
@@ -71,9 +72,9 @@ enum StartupError {
 #[derive(Snafu, Debug)]
 #[snafu(module)]
 enum RequestError {
-    #[snafu(display("error when obtaining information from OpsGenie"))]
+    #[snafu(display("error when obtaining information from OpsGenie: : \n{source}"))]
     OpsGenie { source: opsgenie::Error },
-    #[snafu(display("error when communicating with Twilio"))]
+    #[snafu(display("error when communicating with Twilio: : \n{source}"))]
     Twilio { source: twilio::Error },
 }
 
@@ -93,7 +94,19 @@ impl http_error::Error for RequestError {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), StartupError> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(e) => {
+            // TODO: Not sure whats better here, we log both for now
+            eprintln!("{}", e);
+            eprintln!("{:?}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<(), StartupError> {
     stackable_operator::logging::initialize_logging(
         "WHOYOUGONNACALL_LOG",
         APP_NAME,
@@ -122,8 +135,8 @@ async fn main() -> Result<(), StartupError> {
         .context(ConstructHttpClientSnafu)?;
     tracing::debug!("Reqwest client initialized ..");
 
-    use stackable_webhook::{WebhookServer, Options};
     use axum::Router;
+    use stackable_webhook::{Options, WebhookServer};
 
     let app = Router::new()
         .route("/oncallnumber", get(get_person_on_call))
@@ -134,24 +147,27 @@ async fn main() -> Result<(), StartupError> {
             config: config.clone(),
         }); // TODO: get rid of the .clone()
 
-    let server = WebhookServer::new(app, Options::builder()
-        .bind_address(config.bind_address.split(".").collect(), config.bind_port)
-        .build());
+    let server = WebhookServer::new(
+        app,
+        Options::builder()
+            .bind_address(config.bind_address, config.bind_port)
+            .build(),
+    );
 
-    let bind_address = format!("{}:{}", &config.bind_address, &config.bind_port);
+    /*let bind_address = format!("{}:{}", &config.bind_address, &config.bind_port);
     let listener = TcpListener::bind(&bind_address)
         .await
         .context(BindListenerSnafu)?;
-    tracing::info!("Bound to [{}]", &bind_address);
+    tracing::info!("Bound to [{}]", &bind_address);*/
 
     tracing::info!("Starting server ..");
     /*axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(shutdown_requested)
-        .await
-        .context(RunServerSnafu)
+       .with_graceful_shutdown(shutdown_requested)
+       .await
+       .context(RunServerSnafu)
 
-     */
-    server.run().await.context(RunServerSnafu)?
+    */
+    Ok(server.run().await.context(RunServerSnafu)?)
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Hash, Clone)]
@@ -190,7 +206,7 @@ struct AlertInfo {
 
 #[instrument(name = "health_check")]
 async fn health() -> Result<Json<Status>, http_error::JsonResponse<RequestError>> {
-    tracing::debug!("Responding healthy to healthcheck");
+    tracing::info!("Responding healthy to healthcheck");
     Ok(Json(Status {
         health: Health::Healthy,
     }))

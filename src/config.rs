@@ -5,25 +5,28 @@ use snafu::{OptionExt, ResultExt, Snafu};
 use std::env;
 use std::ffi::OsString;
 use std::fmt::Debug;
+use std::net::{AddrParseError, IpAddr, Ipv4Addr};
 use std::num::ParseIntError;
 use std::str::FromStr;
 use tracing::instrument;
 use url::Url;
-use crate::config::ConfigError::ParsePort;
+use crate::config::ConfigError::{ParseBindAddress, ParsePort};
 
 static BIND_ADDRESS_ENVNAME: &str = "WYGC_BIND_ADDRESS";
-static DEFAULT_BIND_ADDRESS: &str = "0.0.0.0";
+static BIND_ADDRESS_DEFAULT: &str = "0.0.0.0";
 
 static BIND_PORT_ENVNAME: &str = "WYGC_BIND_PORT";
-static DEFAULT_BIND_PORT: &str = "2368";
+static BIND_PORT_DEFAULT: &str = "2368";
 
 static TWILIO_TOKEN_ENVNAME: &str = "WYGC_TWILIO_TOKEN";
 static TWILIO_BASEURL_ENVNAME: &str = "WYGC_TWILIO_BASEURL";
+static TWILIO_BASEURL_DEFAULT: &str = "https://studio.twilio.com/v2/Flows/";
 static TWILIO_WORKFLOW_ENVNAME: &str = "WYGC_TWILIO_WORKFLOW";
 static TWILIO_OUTGOING_NUMBER_ENVNAME: &str = "WYGC_TWILIO_OUTNUMBER";
 
 static OPSGENIE_TOKEN_ENVNAME: &str = "WYGC_OPSGENIE_TOKEN";
 static OPSGENIE_BASEURL_ENVNAME: &str = "WYGC_OPSGENIE_BASEURL";
+static OPSGENIE_BASEURL_DEFAULT: &str = "https://api.opsgenie.com/v2/";
 
 static SLACK_TOKEN_ENVNAME: &str = "WYGC_SLACK_TOKEN";
 static SLACK_BASEURL_ENVNAME: &str = "WYGC_SLACK_BASEURL";
@@ -53,23 +56,26 @@ pub type SecretAuthHeader = Secret<AuthHeader>;
 
 #[derive(Snafu, Debug)]
 pub enum ConfigError {
+    #[snafu(display("failed to parse a valid ipv4 address from [{envname}]: \n{source}"))]
+    ParseBindAddress {source: AddrParseError , envname: String},
+
     #[snafu(display("failed to read value of [{envname}] env var as string"))]
     ConvertOsString { envname: String },
 
     #[snafu(display("missing mandatory configuration [{envname}]"))]
     MissingRequiredValue { envname: String },
 
-    #[snafu(display("baseurl parse error for service [{service}]"))]
+    #[snafu(display("baseurl parse error for service [{service}]: \n{source}"))]
     ConstructBaseUrl {
         source: url::ParseError,
         service: String,
     },
-    #[snafu(display("unable to parse authz header value from [{envname}]"))]
+    #[snafu(display("unable to parse authz header value from [{envname}]: \n{source}"))]
     ConstructAuthHeader {
         source: InvalidHeaderValue,
         envname: String,
     },
-    #[snafu(display("failed to parse port number from [{}] for [{envname}]"))]
+    #[snafu(display("failed to parse port number from [{}] for [{envname}]: \n{source}"))]
     ParsePort {
         source: ParseIntError,
         envname: String,
@@ -80,7 +86,7 @@ pub enum ConfigError {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub bind_address: String,
+    pub bind_address: IpAddr,
     pub bind_port: u16,
 
     pub opsgenie_config: OpsgenieConfig,
@@ -116,19 +122,19 @@ impl Config {
         // TODO: Pretty sure this is a garbage way of doing this, need to look at it some more
         //  `into_string()` probably is the way to go here ..
         let bind_address = env::var_os(BIND_ADDRESS_ENVNAME)
-            .unwrap_or(OsString::from(DEFAULT_BIND_ADDRESS))
+            .unwrap_or(OsString::from(BIND_ADDRESS_DEFAULT))
             .to_str()
             .context(ConvertOsStringSnafu {
-                envname: DEFAULT_BIND_ADDRESS,
+                envname: BIND_ADDRESS_DEFAULT,
             })?
-            .to_string();
+            .parse::<Ipv4Addr>().context(ParseBindAddressSnafu { envname: BIND_ADDRESS_ENVNAME })?;
         tracing::debug!("Bind address set to: [{}]", bind_address);
 
         let bind_port = u16::from_str(env::var_os(BIND_PORT_ENVNAME)
-            .unwrap_or(OsString::from(DEFAULT_BIND_PORT))
+            .unwrap_or(OsString::from(BIND_PORT_DEFAULT))
             .to_str()
             .context(ConvertOsStringSnafu {
-                envname: DEFAULT_BIND_PORT,
+                envname: BIND_PORT_DEFAULT,
             })?
         ).context(ParsePortSnafu { envname: BIND_PORT_ENVNAME })?;
         tracing::debug!("Bind port set to: [{}]", bind_port);
@@ -142,7 +148,7 @@ impl Config {
 
         // Put it all together into a filled config object
         Ok(Config {
-            bind_address,
+            bind_address: bind_address.into(),
             bind_port,
             opsgenie_config,
             twilio_config,
@@ -155,9 +161,13 @@ impl OpsgenieConfig {
     pub fn new() -> Result<Self, ConfigError> {
         // Parse OpsGenie specific configuration values from environment
         // TODO: the default should be in this module I guess..
-        let base_url = opsgenie::get_base_url().context(ConstructBaseUrlSnafu {
-            service: "opsgenie",
-        })?;
+        let base_url = Url::parse(env::var_os(OPSGENIE_BASEURL_ENVNAME)
+            .unwrap_or(OsString::from(OPSGENIE_BASEURL_DEFAULT))
+            .to_str()
+            .context(ConvertOsStringSnafu {
+                envname: OPSGENIE_BASEURL_ENVNAME,
+            })?).context(ConstructBaseUrlSnafu{ service: "OpsGenie" })?;
+
         tracing::debug!("OpsGenie base url parsed as : [{}]", base_url.to_string());
 
         let credentials = get_secret_header_from_env(OPSGENIE_TOKEN_ENVNAME)?;
@@ -173,8 +183,13 @@ impl TwilioConfig {
     pub fn new() -> Result<Self, ConfigError> {
         // Parse Twilio specific configuration values from environment
         // TODO: the default should be in this module I guess..
-        let base_url =
-            twilio::get_base_url().context(ConstructBaseUrlSnafu { service: "twilio" })?;
+        let base_url = Url::parse(env::var_os(TWILIO_BASEURL_ENVNAME)
+            .unwrap_or(OsString::from(TWILIO_BASEURL_DEFAULT))
+            .to_str()
+            .context(ConvertOsStringSnafu {
+                envname: TWILIO_BASEURL_ENVNAME,
+            })?).context(ConstructBaseUrlSnafu{ service: "Twilio" })?;
+
         tracing::debug!("Twilio base url parsed as : [{}]", base_url.to_string());
 
         let credentials = get_secret_header_from_env(TWILIO_TOKEN_ENVNAME)?;
@@ -227,7 +242,7 @@ impl SlackConfig {
         } else {
             // Variable is not set, we'll continue without Slack notifications
             tracing::warn!(
-                "[{SLACK_BASEURL_ENVNAME}] not set, Slack notifictions will be disabled!"
+                "[{SLACK_BASEURL_ENVNAME}] not set, Slack notifications will be disabled!"
             );
             Ok(None)
         }

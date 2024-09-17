@@ -16,9 +16,9 @@ static OPSGENIE_BASEURL: &str = "https://api.opsgenie.com/v2/";
 #[derive(Snafu, Debug)]
 #[snafu(module)]
 pub(crate) enum Error {
-    #[snafu(display("requesting on call person failed"))]
+    #[snafu(display("requesting on call person failed: \n{source}"))]
     RequestOnCallPerson { source: crate::util::Error },
-    #[snafu(display("requesting phone number failed for [{username}]"))]
+    #[snafu(display("requesting phone number failed for [{username}]: \n{source}"))]
     RequestPhoneNumberForPerson {
         source: crate::util::Error,
         username: String,
