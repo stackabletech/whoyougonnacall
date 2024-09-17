@@ -5,8 +5,11 @@ use snafu::{OptionExt, ResultExt, Snafu};
 use std::env;
 use std::ffi::OsString;
 use std::fmt::Debug;
+use std::num::ParseIntError;
+use std::str::FromStr;
 use tracing::instrument;
 use url::Url;
+use crate::config::ConfigError::ParsePort;
 
 static BIND_ADDRESS_ENVNAME: &str = "WYGC_BIND_ADDRESS";
 static DEFAULT_BIND_ADDRESS: &str = "0.0.0.0";
@@ -66,12 +69,19 @@ pub enum ConfigError {
         source: InvalidHeaderValue,
         envname: String,
     },
+    #[snafu(display("failed to parse port number from [{}] for [{envname}]"))]
+    ParsePort {
+        source: ParseIntError,
+        envname: String,
+    },
+
+
 }
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bind_address: String,
-    pub bind_port: String,
+    pub bind_port: u16,
 
     pub opsgenie_config: OpsgenieConfig,
     pub twilio_config: TwilioConfig,
@@ -114,13 +124,13 @@ impl Config {
             .to_string();
         tracing::debug!("Bind address set to: [{}]", bind_address);
 
-        let bind_port = env::var_os(BIND_PORT_ENVNAME)
+        let bind_port = u16::from_str(env::var_os(BIND_PORT_ENVNAME)
             .unwrap_or(OsString::from(DEFAULT_BIND_PORT))
             .to_str()
             .context(ConvertOsStringSnafu {
                 envname: DEFAULT_BIND_PORT,
             })?
-            .to_string();
+        ).context(ParsePortSnafu { envname: BIND_PORT_ENVNAME })?;
         tracing::debug!("Bind port set to: [{}]", bind_port);
 
         let twilio_config = TwilioConfig::new()?;

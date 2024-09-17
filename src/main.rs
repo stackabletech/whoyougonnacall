@@ -135,7 +135,7 @@ async fn main() -> Result<(), StartupError> {
         }); // TODO: get rid of the .clone()
 
     let server = WebhookServer::new(app, Options::builder()
-        .bind_address("0.0.0.0".to_string(), 8080)
+        .bind_address(config.bind_address.split(".").collect(), config.bind_port)
         .build());
 
     let bind_address = format!("{}:{}", &config.bind_address, &config.bind_port);
