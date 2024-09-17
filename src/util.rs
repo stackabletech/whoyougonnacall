@@ -29,7 +29,7 @@ pub enum Error {
 pub async fn send_json_request<T: DeserializeOwned>(req: RequestBuilder) -> Result<T, Error> {
     // make the request
     let response = req.send().await.context(HttpRequestSnafu)?;
-    tracing::trace!("got response from server: [{:?}]",response);
+    tracing::trace!("got response from server: [{:?}]", response);
     // check for client or server errors
     let non_error_response = error_for_status(response).await?;
     // parse the result
@@ -51,13 +51,13 @@ async fn error_for_status(response: Response) -> Result<Response, Error> {
                 url,
                 text: text.trim(),
             }
-                .fail(),
+            .fail(),
             Err(encoding_error) => HttpErrorResponseUndecodableTextSnafu {
                 status,
                 url,
                 encoding_error,
             }
-                .fail(),
+            .fail(),
         };
     }
     Ok(response)

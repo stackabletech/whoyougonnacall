@@ -8,6 +8,7 @@ use crate::config::{Config, ConfigError};
 use crate::opsgenie::{get_oncall_number, UserPhoneNumber};
 use crate::twilio::alert;
 use crate::StartupError::ParseConfig;
+use axum::body::Bytes;
 use axum::extract::Query;
 use axum::http::HeaderMap;
 use axum::routing::get;
@@ -21,6 +22,8 @@ use stackable_operator::logging::TracingTarget;
 use std::env;
 use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
+use std::time::Duration;
+use stackable_telemetry::AxumTraceLayer;
 use tokio::net::TcpListener;
 use tracing::field::{Field, Visit};
 use tracing::{instrument, Value};
@@ -50,7 +53,7 @@ enum StartupError {
     BindListener { source: std::io::Error },
 
     #[snafu(display("failed to run server"))]
-    RunServer { source: std::io::Error },
+    RunServer { source: stackable_webhook::Error },
 
     #[snafu(display("failed to construct http client"))]
     ConstructHttpClient { source: reqwest::Error },
@@ -119,11 +122,21 @@ async fn main() -> Result<(), StartupError> {
         .context(ConstructHttpClientSnafu)?;
     tracing::debug!("Reqwest client initialized ..");
 
+    use stackable_webhook::{WebhookServer, Options};
+    use axum::Router;
+
     let app = Router::new()
         .route("/oncallnumber", get(get_person_on_call))
         .route("/alert", get(alert_on_call))
         .route("/status", get(health))
-        .with_state(AppState { http, config: config.clone() }); // TODO: get rid of the .clone()
+        .with_state(AppState {
+            http,
+            config: config.clone(),
+        }); // TODO: get rid of the .clone()
+
+    let server = WebhookServer::new(app, Options::builder()
+        .bind_address("0.0.0.0".to_string(), 8080)
+        .build());
 
     let bind_address = format!("{}:{}", &config.bind_address, &config.bind_port);
     let listener = TcpListener::bind(&bind_address)
@@ -132,10 +145,13 @@ async fn main() -> Result<(), StartupError> {
     tracing::info!("Bound to [{}]", &bind_address);
 
     tracing::info!("Starting server ..");
-    axum::serve(listener, app.into_make_service())
+    /*axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(shutdown_requested)
         .await
         .context(RunServerSnafu)
+
+     */
+    server.run().await.context(RunServerSnafu)?
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Hash, Clone)]
@@ -172,7 +188,9 @@ struct AlertInfo {
     full_information: Vec<UserPhoneNumber>,
 }
 
+#[instrument(name = "health_check")]
 async fn health() -> Result<Json<Status>, http_error::JsonResponse<RequestError>> {
+    tracing::debug!("Responding healthy to healthcheck");
     Ok(Json(Status {
         health: Health::Healthy,
     }))
@@ -200,13 +218,9 @@ async fn get_person_on_call(
     let AppState { http, config } = state;
     tracing::info!("Got request for schedule [{:?}]", requested_schedule);
     Ok(Json(
-        get_oncall_number(
-            &requested_schedule,
-            &http,
-            &config,
-        )
-        .await
-        .context(request_error::OpsGenieSnafu)?,
+        get_oncall_number(&requested_schedule, &http, &config)
+            .await
+            .context(request_error::OpsGenieSnafu)?,
     ))
 }
 

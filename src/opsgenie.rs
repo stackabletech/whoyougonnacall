@@ -1,17 +1,16 @@
+use crate::config::Config;
 use crate::opsgenie::error::{
-    NoOnCallPersonSnafu, NoPhoneNumberSnafu,
-    RequestOnCallPersonSnafu, RequestPhoneNumberForPersonSnafu,
+    NoOnCallPersonSnafu, NoPhoneNumberSnafu, RequestOnCallPersonSnafu,
+    RequestPhoneNumberForPersonSnafu,
 };
 use crate::util::send_json_request;
 use crate::{http_error, AlertInfo, Schedule};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use hyper::header::AUTHORIZATION;
-use reqwest::header::HOST;
 use reqwest::{Client, Url};
 use secrecy::ExposeSecret;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, Snafu};
-use crate::config::Config;
 
 static OPSGENIE_BASEURL: &str = "https://api.opsgenie.com/v2/";
 #[derive(Snafu, Debug)]
@@ -69,7 +68,11 @@ pub(crate) async fn get_oncall_number(
     http: &Client,
     config: &Config,
 ) -> Result<AlertInfo, Error> {
-    let Config { opsgenie_config, slack_config, .. } = config;
+    let Config {
+        opsgenie_config,
+        slack_config,
+        ..
+    } = config;
     let mut url_builder = opsgenie_config.base_url.clone();
 
     let (schedule_identifier, schedule_identifier_type) = match schedule {
@@ -82,9 +85,15 @@ pub(crate) async fn get_oncall_number(
         .unwrap();
 
     let mut outgoing_headers = HeaderMap::new();
-    outgoing_headers.insert(AUTHORIZATION, opsgenie_config.credentials.expose_secret().clone().0);
+    outgoing_headers.insert(
+        AUTHORIZATION,
+        opsgenie_config.credentials.expose_secret().clone().0,
+    );
 
-    tracing::debug!("Retrieving on call person from [{}]", url_builder.to_string());
+    tracing::debug!(
+        "Retrieving on call person from [{}]",
+        url_builder.to_string()
+    );
     tracing::debug!("Using headers: [{:?}]", outgoing_headers);
 
     let persons_on_call = send_json_request::<OnCallResult>(
@@ -110,10 +119,14 @@ pub(crate) async fn get_oncall_number(
 
     for user in persons_on_call.data.on_call_recipients {
         println!("Looking up phone number for user [{}]", user);
-        let phone_number =
-            get_phone_number(http.clone(), opsgenie_config.base_url.clone(), &outgoing_headers, &user)
-                .await
-                .context(RequestPhoneNumberForPersonSnafu { username: &user })?;
+        let phone_number = get_phone_number(
+            http.clone(),
+            opsgenie_config.base_url.clone(),
+            &outgoing_headers,
+            &user,
+        )
+        .await
+        .context(RequestPhoneNumberForPersonSnafu { username: &user })?;
         result_list.push(UserPhoneNumber {
             name: user.to_string(),
             phone: phone_number,
@@ -123,12 +136,15 @@ pub(crate) async fn get_oncall_number(
     println!("{:?}", result_list);
     let user = result_list.get(0).context(NoOnCallPersonSnafu)?;
     let username = &user.name;
-    let phone_number = user.phone.get(0).context(NoPhoneNumberSnafu{ username: username})?;
+    let phone_number = user
+        .phone
+        .get(0)
+        .context(NoPhoneNumberSnafu { username: username })?;
 
     Ok(AlertInfo {
         username: username.clone(),
         phone_number: phone_number.clone(),
-        full_information: result_list
+        full_information: result_list,
     })
 }
 
@@ -144,7 +160,7 @@ struct ContactInformationResultData {
     id: String,
     username: String,
     full_name: String,
-    userContacts: Vec<UserContact>,
+    user_contacts: Vec<UserContact>,
 }
 
 #[derive(Clone, Deserialize, Debug)]
@@ -152,7 +168,7 @@ struct ContactInformationResultData {
 struct UserContact {
     to: String,
     id: String,
-    contactMethod: String,
+    contact_method: String,
     enabled: bool,
 }
 
@@ -164,7 +180,11 @@ async fn get_phone_number(
 ) -> Result<Vec<String>, crate::util::Error> {
     let url_builder = base_url.clone();
     let url_builder = url_builder.join(&format!("users/{username}")).unwrap();
-    tracing::debug!("Retrieving contact information for [{}] information from [{}]", username, url_builder.to_string());
+    tracing::debug!(
+        "Retrieving contact information for [{}] information from [{}]",
+        username,
+        url_builder.to_string()
+    );
     tracing::debug!("Using headers: [{:?}]", headers);
     let contact_information = send_json_request::<ContactInformationResult>(
         http.get(url_builder.clone())
@@ -176,9 +196,11 @@ async fn get_phone_number(
 
     let mut numbers = contact_information
         .data
-        .userContacts
+        .user_contacts
         .iter()
-        .filter(|user_contact| user_contact.contactMethod.eq("voice") || user_contact.contactMethod.eq("sms"))
+        .filter(|user_contact| {
+            user_contact.contact_method.eq("voice") || user_contact.contact_method.eq("sms")
+        })
         .map(|user_contact| format_phone_number(user_contact.to.clone()))
         .collect::<Vec<String>>();
 

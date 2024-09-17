@@ -1,13 +1,10 @@
-use crate::config::ConfigError::{
-    ConstructAuthHeader, ConstructBaseUrl, MissingOptionalValue, MissingRequiredValue,
-};
 use crate::{opsgenie, twilio};
 use hyper::header::{HeaderValue, InvalidHeaderValue};
-use secrecy::{CloneableSecret, DebugSecret, ExposeSecret, Secret, SecretString, Zeroize};
+use secrecy::{CloneableSecret, DebugSecret, Secret, Zeroize};
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::env;
 use std::ffi::OsString;
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 use tracing::instrument;
 use url::Url;
 
@@ -58,15 +55,6 @@ pub enum ConfigError {
 
     #[snafu(display("missing mandatory configuration [{envname}]"))]
     MissingRequiredValue { envname: String },
-
-    #[snafu(
-        display("optional config value not found: [{envname}], the following functionality will be disabled: [{functionality}]"
-        )
-    )]
-    MissingOptionalValue {
-        envname: String,
-        functionality: String,
-    },
 
     #[snafu(display("baseurl parse error for service [{service}]"))]
     ConstructBaseUrl {
@@ -133,7 +121,7 @@ impl Config {
                 envname: DEFAULT_BIND_PORT,
             })?
             .to_string();
-        tracing::debug!("Bind port set to: [{}]", bind_address);
+        tracing::debug!("Bind port set to: [{}]", bind_port);
 
         let twilio_config = TwilioConfig::new()?;
         let opsgenie_config = OpsgenieConfig::new()?;

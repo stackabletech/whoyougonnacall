@@ -1,21 +1,18 @@
-use crate::opsgenie::get_oncall_number;
-use crate::twilio::error::{BuildUrlSnafu, RunWorkflowSnafu};
-use crate::twilio::Error::{BuildUrl, RunWorkflow};
+use crate::config::{Config, TwilioConfig};
+use crate::twilio::error::BuildUrlSnafu;
 use crate::util::send_json_request;
-use crate::{http_error, AlertInfo, Schedule};
+use crate::{http_error, AlertInfo};
 use axum::http::header::AUTHORIZATION;
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use futures::future::join_all;
-use futures::StreamExt;
 use reqwest::Client;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use std::collections::HashMap;
-use secrecy::ExposeSecret;
 use tracing::instrument;
 use url::{ParseError, Url};
 use urlencoding::encode;
-use crate::config::{Config, TwilioConfig};
 
 static TWILIO_BASEURL: &str = "https://studio.twilio.com/v2/Flows/";
 #[derive(Snafu, Debug)]
@@ -54,7 +51,8 @@ pub async fn alert(
         twilio_config.base_url.to_string()
     );
     tracing::debug!("twilio_workflow: {}", twilio_config.workflow_id);
-    let mut url_builder = twilio_config.base_url
+    let mut url_builder = twilio_config
+        .base_url
         .join(&format!("{}/Executions/", &twilio_config.workflow_id))
         .context(BuildUrlSnafu)?;
     tracing::debug!(
@@ -65,7 +63,10 @@ pub async fn alert(
     tracing::debug!("Using [{}] as alerting endpoint", url_builder.to_string());
 
     let mut outgoing_headers = HeaderMap::new();
-    outgoing_headers.insert(AUTHORIZATION, twilio_config.credentials.expose_secret().clone().0);
+    outgoing_headers.insert(
+        AUTHORIZATION,
+        twilio_config.credentials.expose_secret().clone().0,
+    );
 
     // Create the Hashmap once here, we'll overwrite the "To" field for every iteration....
     // .. no we won't, we are parallelizing here, so we clone
