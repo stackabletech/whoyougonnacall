@@ -1,16 +1,23 @@
+use crate::config::ConfigError::{ParseBindAddress, ParseBool, ParsePort};
 use crate::{opsgenie, twilio};
 use hyper::header::{HeaderValue, InvalidHeaderValue};
 use secrecy::{CloneableSecret, DebugSecret, Secret, Zeroize};
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::env;
+use std::env::VarError;
 use std::ffi::OsString;
 use std::fmt::Debug;
 use std::net::{AddrParseError, IpAddr, Ipv4Addr};
 use std::num::ParseIntError;
-use std::str::FromStr;
+use std::str::{FromStr, ParseBoolError};
 use tracing::instrument;
 use url::Url;
-use crate::config::ConfigError::{ParseBindAddress, ParsePort};
+
+static TRACE_EXPORTER_ENVNAME: &str = "WYGC_ENABLE_TRACE_EXPORT";
+static TRACE_EXPORTER_DEFAULT: bool = false;
+
+static LOG_EXPORTER_ENVNAME: &str = "WYGC_ENABLE_LOG_EXPORT";
+static LOG_EXPORTER_DEFAULT: bool = false;
 
 static BIND_ADDRESS_ENVNAME: &str = "WYGC_BIND_ADDRESS";
 static BIND_ADDRESS_DEFAULT: &str = "0.0.0.0";
@@ -57,7 +64,10 @@ pub type SecretAuthHeader = Secret<AuthHeader>;
 #[derive(Snafu, Debug)]
 pub enum ConfigError {
     #[snafu(display("failed to parse a valid ipv4 address from [{envname}]: \n{source}"))]
-    ParseBindAddress {source: AddrParseError , envname: String},
+    ParseBindAddress {
+        source: AddrParseError,
+        envname: String,
+    },
 
     #[snafu(display("failed to read value of [{envname}] env var as string"))]
     ConvertOsString { envname: String },
@@ -75,13 +85,18 @@ pub enum ConfigError {
         source: InvalidHeaderValue,
         envname: String,
     },
-    #[snafu(display("failed to parse port number from [{}] for [{envname}]: \n{source}"))]
+    #[snafu(display("failed to parse port number for [{envname}]: \n{source}"))]
     ParsePort {
         source: ParseIntError,
         envname: String,
     },
-
-
+    #[snafu(display("failed to parse boolean value for [{envname}]: \n{source}"))]
+    ParseBool {
+        source: ParseBoolError,
+        envname: String,
+    },
+    #[snafu(display("failed to parse boolean value for [{envname}]: \n{source}"))]
+    ConvertEnvString { source: VarError, envname: String },
 }
 
 #[derive(Debug, Clone)]
@@ -127,16 +142,23 @@ impl Config {
             .context(ConvertOsStringSnafu {
                 envname: BIND_ADDRESS_DEFAULT,
             })?
-            .parse::<Ipv4Addr>().context(ParseBindAddressSnafu { envname: BIND_ADDRESS_ENVNAME })?;
+            .parse::<Ipv4Addr>()
+            .context(ParseBindAddressSnafu {
+                envname: BIND_ADDRESS_ENVNAME,
+            })?;
         tracing::debug!("Bind address set to: [{}]", bind_address);
 
-        let bind_port = u16::from_str(env::var_os(BIND_PORT_ENVNAME)
-            .unwrap_or(OsString::from(BIND_PORT_DEFAULT))
-            .to_str()
-            .context(ConvertOsStringSnafu {
-                envname: BIND_PORT_DEFAULT,
-            })?
-        ).context(ParsePortSnafu { envname: BIND_PORT_ENVNAME })?;
+        let bind_port = u16::from_str(
+            env::var_os(BIND_PORT_ENVNAME)
+                .unwrap_or(OsString::from(BIND_PORT_DEFAULT))
+                .to_str()
+                .context(ConvertOsStringSnafu {
+                    envname: BIND_PORT_DEFAULT,
+                })?,
+        )
+        .context(ParsePortSnafu {
+            envname: BIND_PORT_ENVNAME,
+        })?;
         tracing::debug!("Bind port set to: [{}]", bind_port);
 
         let twilio_config = TwilioConfig::new()?;
@@ -161,12 +183,17 @@ impl OpsgenieConfig {
     pub fn new() -> Result<Self, ConfigError> {
         // Parse OpsGenie specific configuration values from environment
         // TODO: the default should be in this module I guess..
-        let base_url = Url::parse(env::var_os(OPSGENIE_BASEURL_ENVNAME)
-            .unwrap_or(OsString::from(OPSGENIE_BASEURL_DEFAULT))
-            .to_str()
-            .context(ConvertOsStringSnafu {
-                envname: OPSGENIE_BASEURL_ENVNAME,
-            })?).context(ConstructBaseUrlSnafu{ service: "OpsGenie" })?;
+        let base_url = Url::parse(
+            env::var_os(OPSGENIE_BASEURL_ENVNAME)
+                .unwrap_or(OsString::from(OPSGENIE_BASEURL_DEFAULT))
+                .to_str()
+                .context(ConvertOsStringSnafu {
+                    envname: OPSGENIE_BASEURL_ENVNAME,
+                })?,
+        )
+        .context(ConstructBaseUrlSnafu {
+            service: "OpsGenie",
+        })?;
 
         tracing::debug!("OpsGenie base url parsed as : [{}]", base_url.to_string());
 
@@ -183,12 +210,15 @@ impl TwilioConfig {
     pub fn new() -> Result<Self, ConfigError> {
         // Parse Twilio specific configuration values from environment
         // TODO: the default should be in this module I guess..
-        let base_url = Url::parse(env::var_os(TWILIO_BASEURL_ENVNAME)
-            .unwrap_or(OsString::from(TWILIO_BASEURL_DEFAULT))
-            .to_str()
-            .context(ConvertOsStringSnafu {
-                envname: TWILIO_BASEURL_ENVNAME,
-            })?).context(ConstructBaseUrlSnafu{ service: "Twilio" })?;
+        let base_url = Url::parse(
+            env::var_os(TWILIO_BASEURL_ENVNAME)
+                .unwrap_or(OsString::from(TWILIO_BASEURL_DEFAULT))
+                .to_str()
+                .context(ConvertOsStringSnafu {
+                    envname: TWILIO_BASEURL_ENVNAME,
+                })?,
+        )
+        .context(ConstructBaseUrlSnafu { service: "Twilio" })?;
 
         tracing::debug!("Twilio base url parsed as : [{}]", base_url.to_string());
 
@@ -259,4 +289,20 @@ fn get_secret_header_from_env(envname: &str) -> Result<SecretAuthHeader, ConfigE
         )
         .context(ConstructAuthHeaderSnafu { envname })?,
     )))
+}
+
+pub fn enable_trace_exporter() -> Result<bool, ConfigError> {
+    extract_env_as_bool(TRACE_EXPORTER_ENVNAME, TRACE_EXPORTER_DEFAULT)
+}
+
+pub fn enable_log_exporter() -> Result<bool, ConfigError> {
+    extract_env_as_bool(LOG_EXPORTER_ENVNAME, LOG_EXPORTER_DEFAULT)
+}
+
+fn extract_env_as_bool(envname: impl AsRef<str>, default: bool) -> Result<bool, ConfigError> {
+    match env::var(envname.as_ref()) {
+        Ok(value) => Ok(bool::from_str(&value).context(ParseBoolSnafu { envname: envname.as_ref() })?),
+        Err(e) if e == VarError::NotPresent => Ok(default),
+        Err(e) => Err(e).context(ConvertEnvStringSnafu { envname: envname.as_ref() }),
+    }
 }

@@ -4,10 +4,10 @@ mod opsgenie;
 mod twilio;
 mod util;
 
-use crate::config::{Config, ConfigError};
+use crate::config::{enable_log_exporter, enable_trace_exporter, Config, ConfigError};
 use crate::opsgenie::{get_oncall_number, UserPhoneNumber};
 use crate::twilio::alert;
-use crate::StartupError::ParseConfig;
+use crate::StartupError::{InitializeTelemetry, ParseConfig};
 use axum::body::Bytes;
 use axum::extract::Query;
 use axum::http::HeaderMap;
@@ -19,14 +19,17 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, Snafu};
 use stackable_operator::kube::config::InferConfigError;
 use stackable_operator::logging::TracingTarget;
-use stackable_telemetry::AxumTraceLayer;
+use stackable_telemetry::{AxumTraceLayer, Tracing};
 use std::env;
+use std::env::var_os;
 use std::ffi::OsString;
 use std::fmt::{Debug, Display, Formatter};
 use std::process::{ExitCode, Termination};
+use std::str::ParseBoolError;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tracing::field::{Field, Visit};
+use tracing::level_filters::LevelFilter;
 use tracing::{instrument, Value};
 
 static BIND_ADDRESS_ENVNAME: &str = "WYGC_BIND_ADDRESS";
@@ -59,13 +62,9 @@ enum StartupError {
     #[snafu(display("failed to construct http client: \n{source}"))]
     ConstructHttpClient { source: reqwest::Error },
 
-    #[snafu(display("failed to read value of [{envname}] env var as string"))]
-    ConvertOsString { envname: String },
-
-    #[snafu(display("baseurl parse error for service [{service}] - THIS IS NOT ON YOU! It is an error in the code!"))]
-    ConstructBaseUrl {
-        source: url::ParseError,
-        service: String,
+    #[snafu(display("failed to initialize tracing: \n{source}"))]
+    InitializeTelemetry {
+        source: stackable_telemetry::tracing::Error,
     },
 }
 
@@ -107,15 +106,26 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<(), StartupError> {
-    stackable_operator::logging::initialize_logging(
-        "WHOYOUGONNACALL_LOG",
-        APP_NAME,
-        // TODO: Make this configurable
-        TracingTarget::None,
-    );
+    let mut builder = Tracing::builder()
+        .service_name("whoyougonnacall")
+        .with_console_output("WYGC_CONSOLE", LevelFilter::INFO);
+
+    // Read env vars for whether to enable trace and log exporting
+    // We do this first in order to have tracing properly initialized
+    // when we start parsing the config
+    if enable_trace_exporter().context(ParseConfigSnafu)? {
+        builder = builder.with_otlp_trace_exporter("TEST_OTLP_TRACE", LevelFilter::TRACE);
+    }
+    if enable_log_exporter().context(ParseConfigSnafu)? {
+        builder = builder.with_otlp_log_exporter("TEST_OTLP_LOG", LevelFilter::TRACE);
+    }
+
+    let _tracing_guard = builder.build().init().context(InitializeTelemetrySnafu)?;
 
     // Create config object and error out if anything goes wrong
     let config = Config::new().context(ParseConfigSnafu)?;
+
+    tracing::info!(?config, "Config parsed successfully");
 
     tracing::debug!("Registering shutdown hook..");
     let shutdown_requested = tokio::signal::ctrl_c().map(|_| ());
@@ -133,7 +143,7 @@ async fn run() -> Result<(), StartupError> {
     let http = ClientBuilder::new()
         .build()
         .context(ConstructHttpClientSnafu)?;
-    tracing::debug!("Reqwest client initialized ..");
+    tracing::debug!(?http, "Reqwest client initialized");
 
     use axum::Router;
     use stackable_webhook::{Options, WebhookServer};
@@ -145,7 +155,9 @@ async fn run() -> Result<(), StartupError> {
         .with_state(AppState {
             http,
             config: config.clone(),
-        }); // TODO: get rid of the .clone()
+            // TODO: get rid of the .clone() but ... lifetimes ... shared state is not easy
+            //  https://stackoverflow.com/questions/75121484/shared-state-doesnt-work-because-of-lifetimes
+        });
 
     let server = WebhookServer::new(
         app,
