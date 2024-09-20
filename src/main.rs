@@ -6,7 +6,7 @@ mod util;
 
 use crate::config::{enable_log_exporter, enable_trace_exporter, Config, ConfigError};
 use crate::opsgenie::{get_oncall_number, UserPhoneNumber};
-use crate::twilio::alert;
+use crate::twilio::{alert, AlertResult};
 use crate::StartupError::{InitializeTelemetry, ParseConfig};
 use axum::body::Bytes;
 use axum::extract::Query;
@@ -31,11 +31,6 @@ use tokio::net::TcpListener;
 use tracing::field::{Field, Visit};
 use tracing::level_filters::LevelFilter;
 use tracing::{instrument, Value};
-
-static BIND_ADDRESS_ENVNAME: &str = "WYGC_BIND_ADDRESS";
-static DEFAULT_BIND_ADDRESS: &str = "127.0.0.1";
-static BIND_PORT_ENVNAME: &str = "WYGC_BIND_PORT";
-static DEFAULT_BIND_PORT: &str = "2368";
 
 pub const APP_NAME: &str = "who-you-gonna-call";
 
@@ -107,17 +102,17 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<(), StartupError> {
     let mut builder = Tracing::builder()
-        .service_name("whoyougonnacall")
+        .service_name(APP_NAME)
         .with_console_output("WYGC_CONSOLE", LevelFilter::INFO);
 
     // Read env vars for whether to enable trace and log exporting
     // We do this first in order to have tracing properly initialized
     // when we start parsing the config
     if enable_trace_exporter().context(ParseConfigSnafu)? {
-        builder = builder.with_otlp_trace_exporter("TEST_OTLP_TRACE", LevelFilter::TRACE);
+        builder = builder.with_otlp_trace_exporter("WYGC_OTLP_TRACE", LevelFilter::TRACE);
     }
     if enable_log_exporter().context(ParseConfigSnafu)? {
-        builder = builder.with_otlp_log_exporter("TEST_OTLP_LOG", LevelFilter::TRACE);
+        builder = builder.with_otlp_log_exporter("WYGC_OTLP_LOG", LevelFilter::TRACE);
     }
 
     let _tracing_guard = builder.build().init().context(InitializeTelemetrySnafu)?;
@@ -149,7 +144,7 @@ async fn run() -> Result<(), StartupError> {
     use stackable_webhook::{Options, WebhookServer};
 
     let app = Router::new()
-        .route("/oncallnumber", get(get_person_on_call))
+        .route("/whosoncall", get(get_person_on_call))
         .route("/alert", get(alert_on_call))
         .route("/status", get(health))
         .with_state(AppState {
@@ -187,13 +182,6 @@ async fn run() -> Result<(), StartupError> {
 enum Schedule {
     ScheduleById(ScheduleRequestById),
     ScheduleByName(ScheduleRequestByName),
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq, Hash, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct Alert {
-    schedule: String,
-    twilio_workflow: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Hash, Clone)]
@@ -237,14 +225,17 @@ pub enum Health {
     Sick,
 }
 
-#[instrument(name = "get_person")]
+#[instrument(name = "who_is_on_call")]
 async fn get_person_on_call(
     State(state): State<AppState>,
     Query(requested_schedule): Query<Schedule>,
     headers: HeaderMap,
 ) -> Result<Json<AlertInfo>, http_error::JsonResponse<RequestError>> {
     let AppState { http, config } = state;
-    tracing::info!("Got request for schedule [{:?}]", requested_schedule);
+    tracing::info!(
+        ?requested_schedule,
+        "Got request to look up on call persons for schedule"
+    );
     Ok(Json(
         get_oncall_number(&requested_schedule, &http, &config)
             .await
@@ -252,20 +243,15 @@ async fn get_person_on_call(
     ))
 }
 
-#[instrument(name = "parse_config")]
+#[instrument(name = "alert")]
 async fn alert_on_call(
     State(state): State<AppState>,
-    Query(requested_alert): Query<Alert>,
-    headers: HeaderMap,
-) -> Result<Json<AlertInfo>, http_error::JsonResponse<RequestError>> {
+    Query(requested_alert): Query<Schedule>,
+) -> Result<Json<AlertResult>, http_error::JsonResponse<RequestError>> {
     let AppState { http, config } = state;
-    tracing::info!("Got alert request [{:?}]", requested_alert);
+    tracing::info!(?requested_alert, "Got alert request!");
 
-    let schedule = Schedule::ScheduleByName(ScheduleRequestByName {
-        name: requested_alert.schedule,
-    });
-    let twilio_workflow = requested_alert.twilio_workflow;
-    tracing::trace!("twilio workflow: [{}]", twilio_workflow);
+    let schedule = requested_alert.clone();
     let people_to_alert = get_oncall_number(&schedule, &http, &config)
         .await
         .context(request_error::OpsGenieSnafu)?;

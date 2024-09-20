@@ -118,7 +118,7 @@ pub(crate) async fn get_oncall_number(
     let mut result_list: Vec<UserPhoneNumber> = Vec::new();
 
     for user in persons_on_call.data.on_call_recipients {
-        println!("Looking up phone number for user [{}]", user);
+        tracing::debug!(user, "Looking up phone number");
         let phone_number = get_phone_number(
             http.clone(),
             opsgenie_config.base_url.clone(),
@@ -133,7 +133,6 @@ pub(crate) async fn get_oncall_number(
         })
     }
 
-    println!("{:?}", result_list);
     let user = result_list.get(0).context(NoOnCallPersonSnafu)?;
     let username = &user.name;
     let phone_number = user

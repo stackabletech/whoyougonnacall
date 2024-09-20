@@ -146,7 +146,7 @@ impl Config {
             .context(ParseBindAddressSnafu {
                 envname: BIND_ADDRESS_ENVNAME,
             })?;
-        tracing::debug!("Bind address set to: [{}]", bind_address);
+        tracing::trace!(?bind_address, "Bind address set");
 
         let bind_port = u16::from_str(
             env::var_os(BIND_PORT_ENVNAME)
@@ -159,7 +159,7 @@ impl Config {
         .context(ParsePortSnafu {
             envname: BIND_PORT_ENVNAME,
         })?;
-        tracing::debug!("Bind port set to: [{}]", bind_port);
+        tracing::debug!(bind_port, "Bind port set");
 
         let twilio_config = TwilioConfig::new()?;
         let opsgenie_config = OpsgenieConfig::new()?;
@@ -301,8 +301,12 @@ pub fn enable_log_exporter() -> Result<bool, ConfigError> {
 
 fn extract_env_as_bool(envname: impl AsRef<str>, default: bool) -> Result<bool, ConfigError> {
     match env::var(envname.as_ref()) {
-        Ok(value) => Ok(bool::from_str(&value).context(ParseBoolSnafu { envname: envname.as_ref() })?),
+        Ok(value) => Ok(bool::from_str(&value).context(ParseBoolSnafu {
+            envname: envname.as_ref(),
+        })?),
         Err(e) if e == VarError::NotPresent => Ok(default),
-        Err(e) => Err(e).context(ConvertEnvStringSnafu { envname: envname.as_ref() }),
+        Err(e) => Err(e).context(ConvertEnvStringSnafu {
+            envname: envname.as_ref(),
+        }),
     }
 }
